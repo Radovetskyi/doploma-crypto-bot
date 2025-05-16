@@ -1,6 +1,5 @@
 import matplotlib
 matplotlib.use('Agg')
-
 import telebot
 import yfinance as yf
 import matplotlib.pyplot as plt
@@ -16,15 +15,22 @@ from itertools import product
 import warnings
 import os
 from dotenv import load_dotenv
+from langchain_openai import AzureChatOpenAI
 
 load_dotenv()
 
-# Ініціалізація бота з API-ключем
+llm = AzureChatOpenAI(
+    api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+    azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
+    api_version='2025-01-01-preview',
+    azure_deployment='gpt-4o-mini'
+)
 
+# Ініціалізація бота з API-ключем
 bot = telebot.TeleBot(os.environ.get("API_KEY_TELEGRAM"))
 
 # Завантаження FAQ з файлу
-def load_faq_data(file_path="faq.txt"):
+def load_faq_data(file_path="ProgAgents\\faq.txt"):
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
     faq = {}
@@ -46,19 +52,63 @@ def find_best_answer(user_query, faq_data):
         return "Вибачте, я не знайшов відповіді на ваше запитання."
 
 # Функція для побудови графіку криптовалют
-def plot_crypto(symbol, period="1mo"):
-    data = yf.download(symbol, period=period)
-    plt.figure(figsize=(10, 5))
-    plt.plot(data.index, data['Close'], label=f"{symbol} (Close Price)")
-    plt.xlabel("Дата", fontsize=8)
-    plt.ylabel("Ціна (USD)")
-    plt.xticks(rotation=45, fontsize=8)
-    plt.title(f"Графік {symbol} за {period}")
-    plt.legend()
-    plt.grid(True)
+def plot_crypto(symbol, period="12mo"):
+    df = yf.download(symbol, period=period)
+    data = clean_yfinance_dataframe(df)
+    data['SMA20'] = data['Close'].rolling(window=20).mean()
+    data['SMA50'] = data['Close'].rolling(window=50).mean()
+    
+    # RSI розрахунок
+    delta = data['Close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
+    rs = avg_gain / avg_loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1]})
 
-    # Збереження графіку у буфер пам'яті
+    # Ціновий графік з індикаторами
+    ax1.plot(data.index, data['Close'], label='Ціна (Close)', color='blue')
+    ax1.plot(data.index, data['SMA20'], label='SMA 20', color='orange', linestyle='--')
+    ax1.plot(data.index, data['SMA50'], label='SMA 50', color='magenta', linestyle='--')
+
+    # Додаткова вісь для обсягу
+    if 'Volume' in data.columns:
+        volume = data['Volume']
+        if not volume.isna().all() and volume.size > 0:
+            ax1b = ax1.twinx()
+            ax1b.bar(data.index, volume.fillna(0), alpha=0.1, label='Обсяг торгів', color='gray')
+            ax1b.set_ylabel("Обсяг торгів", color='gray')
+            ax1b.tick_params(axis='y', labelcolor='gray')
+    
+    # Макс/мін
+    max_price = data['Close'].max()
+    min_price = data['Close'].min()
+    max_date = data['Close'].idxmax()
+    min_date = data['Close'].idxmin()
+    ax1.scatter([max_date], [max_price], color='green', label='Макс', zorder=5)
+    ax1.scatter([min_date], [min_price], color='red', label='Мін', zorder=5)
+
+    ax1.set_title(f"{symbol}: ціна, обсяги, SMA20/SMA50")
+    ax1.set_ylabel("Ціна (USD)")
+    ax1.legend(loc='upper left')
+    ax1.grid(True)
+
+    # RSI графік
+    ax2.plot(data.index, data['RSI'], label='RSI', color='purple')
+    ax2.axhline(70, color='red', linestyle='--', alpha=0.5)
+    ax2.axhline(30, color='green', linestyle='--', alpha=0.5)
+    ax2.set_ylim(0, 100)
+    ax2.set_ylabel("RSI")
+    ax2.set_xlabel("Дата")
+    ax2.legend()
+    ax2.grid(True)
+
+    # Збереження
     buf = io.BytesIO()
+    plt.tight_layout()
     plt.savefig(buf, format='png')
     buf.seek(0)
     plt.close()
@@ -159,13 +209,15 @@ def plot_crypto_with_arima(symbol, period="max", interval="1mo", forecast_period
         else:
             recommendation = "Утримувати актив"
 
-        print(f"\n--- {symbol} ---")
-        print(f"Остання ціна: {last_price:.2f} USD")
-        print(f"Прогноз через {forecast_periods} міс.: {forecasted_price:.2f} USD")
-        print(f"Зміна: {change_pct:.2f}%")
-        print(f"Рекомендація: {recommendation}")
+        forecast_text = (
+        f"*{symbol}*\n"
+        f"Остання ціна: `{last_price:.2f}` USD\n"
+        f"Прогноз через {forecast_periods} міс.: `{forecasted_price:.2f}` USD\n"
+        f"Зміна: `{change_pct:.2f}%`\n"
+        f"{recommendation}"
+        )
 
-        return buf
+        return buf, forecast_text
 
 # Функція для створення клавіатури з кнопками
 def create_crypto_keyboard():
@@ -174,7 +226,9 @@ def create_crypto_keyboard():
         InlineKeyboardButton("BTC-USD", callback_data="BTC-USD"),
         InlineKeyboardButton("ETH-USD", callback_data="ETH-USD"),
         InlineKeyboardButton("BNB-USD", callback_data="BNB-USD"),
-        InlineKeyboardButton("SOL-USD", callback_data="SOL-USD")
+        InlineKeyboardButton("SOL-USD", callback_data="SOL-USD"),
+        InlineKeyboardButton("Predict BTC", callback_data="predict_BTC-USD"),
+        InlineKeyboardButton("Predict ETH", callback_data="predict_ETH-USD")
     ]
     keyboard.add(*buttons)
     return keyboard
@@ -187,10 +241,8 @@ faq_data = load_faq_data()
 def send_welcome(message):
     bot.reply_to(message, "Вітаю! Я ваш помічник з криптовалют. Виберіть графік криптовалюти:", reply_markup=create_crypto_keyboard())
 
-
-
 # Обробка натискання кнопок
-@bot.callback_query_handler(func=lambda call: True)
+@bot.callback_query_handler(func=lambda call: not call.data.startswith("predict_"))
 def handle_callback_query(call):
     symbol = call.data
     buf = plot_crypto(symbol)
@@ -204,6 +256,14 @@ def handle_message(message):
     answer = find_best_answer(user_query, faq_data)
     bot.reply_to(message, f"Відповідь: {answer}")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("predict_"))
+def predict_with_ai(call):
+    symbol = call.data.replace("predict_", "")
+    try:
+        buf, forecast_text = plot_crypto_with_arima(symbol)
+        bot.send_photo(call.message.chat.id, buf, caption=forecast_text, parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Помилка під час прогнозу: {str(e)}")
 
 
 # Запуск бота
