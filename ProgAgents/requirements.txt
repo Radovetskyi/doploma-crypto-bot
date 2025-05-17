@@ -9,3 +9,7 @@ tensorflow
 telebot
 yfinance
 mplfinance
+langchain
+langchain_openai
+dotenv
+itertools

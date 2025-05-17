@@ -3,6 +3,7 @@ matplotlib.use('Agg')
 import telebot
 import yfinance as yf
 import matplotlib.pyplot as plt
+import string
 import io
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from difflib import get_close_matches
@@ -16,6 +17,7 @@ import warnings
 import os
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
+from langchain.prompts import ChatPromptTemplate
 
 load_dotenv()
 
@@ -25,6 +27,11 @@ llm = AzureChatOpenAI(
     api_version='2025-01-01-preview',
     azure_deployment='gpt-4o-mini'
 )
+
+def load_system_info(path : string = 'ProgAgents\info.txt'):
+    with open(path, encoding='utf-8') as f:
+        content = f.read()
+    return content
 
 # Ініціалізація бота з API-ключем
 bot = telebot.TeleBot(os.environ.get("API_KEY_TELEGRAM"))
@@ -250,11 +257,26 @@ def handle_callback_query(call):
     bot.answer_callback_query(call.id)
 
 # Обробка текстових повідомлень
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    user_query = message.text.strip()  # Не перетворюємо в верхній регістр
-    answer = find_best_answer(user_query, faq_data)
-    bot.reply_to(message, f"Відповідь: {answer}")
+# @bot.message_handler(func=lambda message: True)
+# def handle_message(message):
+#     user_query = message.text.strip()  # Не перетворюємо в верхній регістр
+#     answer = find_best_answer(user_query, faq_data)
+#     bot.reply_to(message, f"Відповідь: {answer}")
+
+@bot.message_handler(func= lambda message: True)
+def handle_message(message : string):
+    user_input = message.text.strip()
+    sys_info = load_system_info()
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", f"""Ти агент, який підключений до системи інтелектуального аналізу криптовалют, яка реалізована на платформі Телегам.
+                            Більше інформації про систему: {sys_info}
+                            Відповідай на питання ніби ти фінансовий анатілик і торговий агент, пояснюй стримано свої відповіді
+                        """),
+            ("user", f"{user_input}")
+        ])
+    response = llm.invoke(prompt.format(user_input=user_input))
+    bot.reply_to(message, response.content)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("predict_"))
 def predict_with_ai(call):
